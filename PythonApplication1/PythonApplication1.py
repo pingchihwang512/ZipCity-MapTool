@@ -8,6 +8,7 @@ from branca.element import IFrame               # branca 是 folium 的一个工
 from collections import defaultdict             # Python Collection 中導入 defaultdict 
                                                 # defaultdict: 一種字典類, 可自定義字典中的鍵提供默認值, 當訪問不存在的鍵時, 不會拋出 KeyError, 而是返回默認值
 
+
 # 使用 re 模块的 findall 方法从地址中查找一个或多个5位数邮政编码，返回最后一个或 None。
 # `r`: 告诉 Python 这是一个原始字符串，这意味着字符串内的转义字符将不被处理（例如，\不会被视为转义字符）。
 # `\b`: 单词边界，确保数字序列位于单词的开始或结束。
@@ -17,7 +18,6 @@ from collections import defaultdict             # Python Collection 中導入 de
 # `-`:表示數字緊接一個連字符
 # `|`:邏輯或操作符號, 表示滿足前後任一條件即可
 def extract_postal_code(address):
-    #postal_codes = re.findall(r'\b\d{5}\b', address) 
     postal_codes = re.findall(r'\d{5}(?=-|\b)', address)
     return postal_codes[-1] if postal_codes else None
 
@@ -27,80 +27,97 @@ def extract_postal_code(address):
 #  width: 彈窗基本寬度
 #  height: 彈窗基本高度 
 def create_large_popup(content, width=250, height=100):
-    iframe = IFrame(html=content, width=width+20, height=height+20)  # 加20為padding
-    return folium.Popup(iframe, max_width=width+20)    #創件並返回包含上述IFrame的folium.Popup對象
-
+    iframe = IFrame(html=content, width=width + 20, height=height + 20)     # 加20為padding
+    return folium.Popup(iframe, max_width=width + 20)                       #創件並返回包含上述IFrame的folium.Popup對象
 
 def load_data():
-    root = tk.Tk()  # 創建一個窗口實例
-    root.withdraw()  # 不顯示主窗口
-    file_path = filedialog.askopenfilename(title="選擇 Excel 文件", filetypes=[("Excel files", "*.xlsx *.xls")])    # 來自 tkinter 庫中的 filedialog 模塊, filedialog.askopenfilename() 彈出一個對話框，讓用戶選擇本地 Excel 文件。
+    root = tk.Tk()      # 創建一個窗口實例
+    root.withdraw()     # 不顯示主窗口
+    file_path = filedialog.askopenfilename(title="選擇 Excel 文件", filetypes=[("Excel files", "*.xlsx *.xls")])        # 來自 tkinter 庫中的 filedialog 模塊, filedialog.askopenfilename() 彈出一個對話框，讓用戶選擇本地 Excel 文件。
     if not file_path:
         print("No file selected.")
-        return
+        return None
 
-    df = pd.read_excel(file_path)   # 讀取Excel文件, 將其加載為一個 pandas 的 DataFrame 對象
+    df = pd.read_excel(file_path)       # 讀取Excel文件, 將其加載為一個 pandas 的 DataFrame 對象
+    df['PostalCode'] = df['Address'].dropna().apply(extract_postal_code)    # 从地址中提取邮政编码
 
-    # 从地址中提取邮政编码
-    df['PostalCode'] = df['Address'].dropna().apply(extract_postal_code) # 訪問 DataFrame 中的 Address 列, 用 .dropna() 刪除列中 Nan 行, 函數 extract_postal_code 提取出 ZipCode 放在一個新的列
-    postal_codes = df['PostalCode'].dropna().tolist()   # 將上述列轉換為 Python 列表
+    nomi = pgeocode.Nominatim('us')     # pgeocode庫初始化 Nominatim對象, 用來查询 ZipCode 返回相關地理信息(例如 城市名,經緯度, 州/省)，设置为美国
+    
+    city_to_locations = defaultdict(lambda: None)               # 為了在地圖上生成 Marker, 需要一個dictionary, 輸入:zipcode 鍵:City, State 值:latitude,longitude 
+    city_to_zip_counts = defaultdict(lambda: defaultdict(int))  # 為了計算每個城市中郵政編號出現的次數, 外層鍵: City, 內層鍵:ZipCode, 內層值:ZipCode在城市重複出現次數
+    state_to_cities = defaultdict(lambda: defaultdict(int))     # 為了存儲每個州下的每個城市的客人數,  外層鍵: State, 內層鍵:City, 內層值:城市中的客人數量
 
-    #  pgeocode庫初始化 Nominatim對象, 用來查询 ZipCode 返回相關地理信息(例如 城市名,經緯度, 州/省)，设置为美国
-    nomi = pgeocode.Nominatim('us')
-
-    city_to_locations = defaultdict(lambda: None)  #  創建一個 defaultdict (Python 的 collections 模塊中的一種特殊字典) 每個鍵對應程式名, 值則是該城市相關地理位置, 訪問不存在的鍵會自動生成默認值為None的項
-    city_to_zipcodes = defaultdict(list)  # 同上, 但字典訪問未添加的程式會自動初始化一個空列表作為該程式的值
-    unprocessed_codes = []
-
-    # 遍历邮政编码列表，获取城市名和位置, 這邊要注意到有可能會有不同zipcode返回相同城市名 所以不能用CityName作為唯一鍵 我這邊選擇用 CityName + Zipcode
-    for postal_code in postal_codes:
+    for postal_code in df['PostalCode'].dropna():
         try:
             location = nomi.query_postal_code(str(postal_code))     # 使用 pgeocode 库中的 Nominatim 类查询给定 Zipcode 的地理信息
             if location is not None and not location.empty:
-                if not pd.isnull(location.place_name):
-                    city = location.place_name
-                    state = location.state_name
-                    unique_key = f"{city}, {state}"
-                    if city_to_locations[unique_key] is None:
-                        city_to_locations[unique_key] = (location.latitude, location.longitude)
-                    city_to_zipcodes[unique_key].append(postal_code)
-                else:
-                    unprocessed_codes.append(postal_code)
-            else:
-                unprocessed_codes.append(postal_code)
+                city = location.place_name
+                state = location.state_name
+                unique_key = f"{city}, {state}"
+                if city_to_locations[unique_key] is None:
+                    city_to_locations[unique_key] = (location.latitude, location.longitude)
+                city_to_zip_counts[unique_key][postal_code] += 1
+                state_to_cities[state][city] += 1
         except Exception as e:
             print(f"Failed to process postal code {postal_code}: {e}")
-            unprocessed_codes.append(postal_code)
 
-    # 创建地图，中心设在美国中部
-    m = folium.Map(location=[39.8283, -98.5795], zoom_start=4)
+    m = folium.Map(location=[39.8283, -98.5795], zoom_start=4, height='70%')     # 创建地图，中心设在美国中部
 
     # 添加标记
     for city, location in city_to_locations.items():
         if location is not None:
-            count = len(city_to_zipcodes[city])
-            zipcodes = ', '.join(city_to_zipcodes[city])
-            content = f"<div style='font-size:12px;'><strong>{city} ({count})</strong><br>Zip Codes: {zipcodes}</div>"
-            
-            # 設定寬度和高度
-            popup = create_large_popup(content, width=250, height=100)  
-            
-            # 使用HTML格式化的tooltip文字
-            tooltip_text = f"<div style='font-size:18px; font-weight:bold;'>{city} ({count})</div>"
-            
+            zip_counts = city_to_zip_counts[city]
+            zip_list = "".join(f"{zip_code} " * count for zip_code, count in zip_counts.items())
+            content = f"<div style='font-size:12px;'><strong>{city}</strong><br>Zip Codes: {zip_list.strip()}</div>"
+            popup = create_large_popup(content, width=250, height=100)
             folium.Marker(
                 location,
                 popup=popup,
-                tooltip=tooltip_text
+                tooltip=f"<div style='font-size:18px; font-weight:bold;'>{city}</div>"
             ).add_to(m)
+            
+    # 按州和城市計數，排序並顯示前10個州的資訊，包括州名、城市及城市數量
+    sorted_states = sorted(state_to_cities.items(), key=lambda item: sum(item[1].values()), reverse=True)[:10]
+    states_html = []
+    for state, cities in sorted_states:
+        total_count = sum(cities.values())
+        cities_html = "".join(f"<p>{city} ({count})</p>" for city, count in cities.items())
+        states_html.append(f"<div><h1>{state} ({total_count})</h1>{cities_html}</div>")
 
-    # filedialog.asksaveasfilename()保存地图为 HTML 文件
-    map_file_path = filedialog.asksaveasfilename(title="保存地圖文件", filetypes=[("HTML files", "*.html")], defaultextension=".html")
+    html = f"""
+    <style>
+        #state-info {{
+            position: absolute;
+            top: 70%;
+            width: 100%;
+            height: 30%;
+            overflow-x: auto;
+            white-space: nowrap;
+            background: #FFFFFF;
+        }}
+        #state-info div {{
+            display: inline-block;
+            width: 300px;
+            vertical-align: top;
+            margin-right: 10px;
+            padding: 5px;
+            border: 1px solid #ccc;
+            box-shadow: 2px 2px 5px 0px rgba(0,0,0,0.2);
+        }}
+    </style>
+    <div id='state-info'>
+        {''.join(states_html)}
+    </div>
+    """
+    m.get_root().html.add_child(folium.Element(html))
+
+    map_file_path = filedialog.asksaveasfilename(title="保存地图文件", filetypes=[("HTML files", "*.html")], defaultextension=".html")    # filedialog.asksaveasfilename()保存地图为 HTML 文件
     if map_file_path:
         m.save(map_file_path)
         print(f"Map has been saved as {map_file_path}")
     else:
         print("Map save cancelled.")
+
 
 # if __name__ == "__main__": 是 Python 中的慣用法，用來判斷當前模組是否被直接執行。
 # 如果是直接執行，__name__ 的值為 "__main__"，程式會執行這段區塊的代碼。
